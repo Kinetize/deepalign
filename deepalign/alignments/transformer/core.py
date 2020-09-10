@@ -98,8 +98,8 @@ class Transformer(tf.keras.Model):
 
         split = len(self.cf_inputs)
 
-        cf_in = x_in[:split]
-        fc_in = x_in[split:]
+        cf_in = x_in_[:split]
+        fc_in = x_in_[split:]
 
         # We dont have to check if we have event attributes, since we will always have at least 1 attribute (CF)
         # Otherwise, we wouldnt even have outputs
