@@ -265,9 +265,15 @@ class ConfNet:
         self.net_b.save_weights(file_name + '_backward.h5')
 
     def load(self, file_name, dataset):
-        self.net_f([np.pad(f[:50], ((0, 0), (0, 10 + 1))) for f in dataset.features])
+        self.net_f(np.concatenate(
+            [np.pad(f[:100], ((0, 0), (0, 10 + 1))) if t != FeatureType.CASE else np.expand_dims(f[:100], axis=-1) for
+             f, t in
+             zip(dataset.features, dataset.feature_types)], axis=1))
         self.net_f.load_weights(file_name + '_forward.h5')
-        self.net_b([np.pad(f[:50], ((0, 0), (0, 10 + 1))) for f in dataset.features])
+        self.net_b(np.concatenate(
+            [np.pad(f[:100], ((0, 0), (0, 10 + 1))) if t != FeatureType.CASE else np.expand_dims(f[:100], axis=-1) for
+             f, t in
+             zip(dataset.features, dataset.feature_types)], axis=1))
         self.net_b.load_weights(file_name + '_backward.h5')
 
     def batch_align(self, dataset, batch_size=5000, detailed=False, **kwargs):
