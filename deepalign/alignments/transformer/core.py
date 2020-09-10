@@ -95,11 +95,13 @@ class Transformer(tf.keras.Model):
                                                                                  j] != FeatureType.CASE else 1
                 x_in.append(x_in_[:, i:i + width])
                 i += width
+        else:
+            x_in = x_in_
 
         split = len(self.cf_inputs)
 
-        cf_in = x_in_[:split]
-        fc_in = x_in_[split:]
+        cf_in = x_in[:split]
+        fc_in = x_in[split:]
 
         # We dont have to check if we have event attributes, since we will always have at least 1 attribute (CF)
         # Otherwise, we wouldnt even have outputs
