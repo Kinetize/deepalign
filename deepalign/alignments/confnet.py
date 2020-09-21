@@ -120,9 +120,6 @@ class BINet(tf.keras.Model):
 
     def call(self, inputs_, training=False, return_state=False, initial_state=None):
         if not isinstance(inputs_, list):
-            # inputs = [inputs]
-            # inputs = [inputs[:, :, i] for i in range(self.num_attributes)]
-            # inputs = [inputs[:, :15], inputs[:, 15:]]
             inputs = []
 
             i = 0
