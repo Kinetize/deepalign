@@ -24,6 +24,7 @@ from deepalign.alignments.bibs import bibs_step
 from deepalign.alignments.bibs import build_alignments
 from deepalign.alignments.bibs import build_beams
 from deepalign.alignments.bibs import get_alignments
+from deepalign.alignments.transformer.transformer import TransformerModel
 from deepalign.anomalydetection import AnomalyDetectionResult
 from deepalign.anomalydetection import Binarizer
 from deepalign.enums import AttributeType
@@ -35,8 +36,6 @@ from deepalign.utils import gather
 from deepalign.utils import log_probs
 from deepalign.utils import reverse
 from deepalign.utils import to_targets
-
-from deepalign.alignments.transformer.transformer import TransformerModel
 
 
 def binet_scores_fn(features, predictions):
@@ -60,7 +59,8 @@ class BINet(tf.keras.Model):
                  use_event_attributes=None,
                  use_present_activity=None,
                  use_present_attributes=None,
-                 use_attention=None):
+                 use_attention=None,
+                 max_case_len_mod=0):
         super(BINet, self).__init__()
 
         # Validate parameters
@@ -77,11 +77,14 @@ class BINet(tf.keras.Model):
         # Parameters
         self.latent_dim = latent_dim
         self.num_attributes = dataset.num_attributes
+        self.num_event_attributes = dataset.num_event_attributes
         self.use_case_attributes = use_case_attributes
         self.use_event_attributes = use_event_attributes
         self.use_present_activity = use_present_activity
         self.use_present_attributes = use_present_attributes
         self.use_attention = use_attention
+        self.dataset = dataset
+        self.max_case_length = (dataset.max_len + max_case_len_mod) * self.num_event_attributes
 
         # Single layers
         self.fc = None
@@ -115,11 +118,21 @@ class BINet(tf.keras.Model):
                 out = tf.keras.layers.Dense(dim + 1, activation='softmax')
                 self.outs.append(out)
 
-    def call(self, inputs, training=False, return_state=False, initial_state=None):
-        if not isinstance(inputs, list):
+    def call(self, inputs_, training=False, return_state=False, initial_state=None):
+        if not isinstance(inputs_, list):
             # inputs = [inputs]
-            inputs = [inputs[:, :, i] for i in range(self.num_attributes)]
+            # inputs = [inputs[:, :, i] for i in range(self.num_attributes)]
             # inputs = [inputs[:, :15], inputs[:, 15:]]
+            inputs = []
+
+            i = 0
+            for j in range(self.num_attributes):
+                width = self.max_case_length // self.num_event_attributes if self.dataset.feature_types[
+                                                                                 j] != FeatureType.CASE else 1
+                inputs.append(inputs_[:, i:i + width])
+                i += width
+        else:
+            inputs = inputs_
 
         split = len(self.rnn_inputs)
 
@@ -204,25 +217,30 @@ class ConfNet:
     abbreviation = 'confnet'
     name = 'ConfNet'
 
-    def __init__(self, dataset, latent_dim=None, use_case_attributes=None, use_event_attributes=None, align=False):
+    def __init__(self, dataset, latent_dim=None, use_case_attributes=None, use_event_attributes=None, align_steps=-1,
+                 use_rnn=False):
         super(ConfNet, self).__init__()
 
         self.dataset = dataset
 
+        self.align_steps = align_steps
         self.use_case_attributes = use_case_attributes
         self.use_event_attributes = use_event_attributes
 
-        self.net_f = TransformerModel(dataset=dataset, max_case_length_modificator=11 if align else 0)
-        self.net_b = TransformerModel(dataset=dataset, max_case_length_modificator=11 if align else 0)
-
-        # self.net_f = BINet(dataset=dataset,
-        #                    latent_dim=latent_dim,
-        #                    use_case_attributes=use_case_attributes,
-        #                    use_event_attributes=use_event_attributes)
-        # self.net_b = BINet(dataset=dataset,
-        #                    latent_dim=latent_dim,
-        #                    use_case_attributes=use_case_attributes,
-        #                    use_event_attributes=use_event_attributes)
+        if use_rnn:
+            self.net_f = BINet(dataset=dataset,
+                               latent_dim=latent_dim,
+                               use_case_attributes=use_case_attributes,
+                               use_event_attributes=use_event_attributes,
+                               max_case_len_mod=self.align_steps + 1)
+            self.net_b = BINet(dataset=dataset,
+                               latent_dim=latent_dim,
+                               use_case_attributes=use_case_attributes,
+                               use_event_attributes=use_event_attributes,
+                               max_case_len_mod=self.align_steps + 1)
+        else:
+            self.net_f = TransformerModel(dataset=dataset, max_case_len_mod=self.align_steps + 1)
+            self.net_b = TransformerModel(dataset=dataset, max_case_len_mod=self.align_steps + 1)
 
         self.net_f.compile(tf.keras.optimizers.Adam(), 'sparse_categorical_crossentropy')
         self.net_b.compile(tf.keras.optimizers.Adam(), 'sparse_categorical_crossentropy')
@@ -232,10 +250,8 @@ class ConfNet:
         return f'{self.abbreviation}{int(self.use_event_attributes)}{int(self.use_case_attributes)}'
 
     def predict(self, inputs_f, inputs_b):
-        out_f = self.net_f(np.concatenate([f if t != FeatureType.CASE else np.expand_dims(f, axis=-1) for f, t in
-                                           zip(inputs_f, self.dataset.feature_types)], axis=1))
-        out_b = self.net_b(np.concatenate([f if t != FeatureType.CASE else np.expand_dims(f, axis=-1) for f, t in
-                                           zip(inputs_b, self.dataset.feature_types)], axis=1))
+        out_f = self.net_f(self.to_np_input(inputs_f, self.dataset.feature_types))
+        out_b = self.net_b(self.to_np_input(inputs_b, self.dataset.feature_types))
 
         if not isinstance(out_f, list):
             out_f = [out_f]
@@ -245,17 +261,11 @@ class ConfNet:
         return [f.numpy() for f in out_f], [b.numpy() for b in out_b]
 
     def fit(self, dataset, batch_size=32, **kwargs):
-        # h1 = self.net_f.fit(np.concatenate([np.expand_dims(f, axis=-1) for f in dataset.features], axis=-1), np.concatenate([np.expand_dims(f, axis=-1) for f in dataset.targets], axis=-1), batch_size=batch_size, **kwargs)
-        h1 = self.net_f.fit(np.concatenate([f if t != FeatureType.CASE else np.expand_dims(f, axis=-1) for f, t in
-                                            zip(dataset.features, dataset.feature_types)], axis=1), dataset.targets,
+        h1 = self.net_f.fit(self.to_np_input(dataset.features, dataset.feature_types), dataset.targets,
                             batch_size=batch_size, **kwargs)
-        # self.net_f(np.concatenate([f if t != FeatureType.CASE else np.expand_dims(f, axis=-1) for f, t in
-        #                                     zip(dataset.features, dataset.feature_types)], axis=1))
 
         dataset.reverse(True)
-        # h2 = self.net_b.fit(np.concatenate([np.expand_dims(f, axis=-1) for f in dataset.features], axis=-1), np.concatenate([np.expand_dims(f, axis=-1) for f in dataset.targets], axis=-1), batch_size=batch_size, **kwargs)
-        h2 = self.net_b.fit(np.concatenate([f if t != FeatureType.CASE else np.expand_dims(f, axis=-1) for f, t in
-                                            zip(dataset.features, dataset.feature_types)], axis=1), dataset.targets,
+        h2 = self.net_b.fit(self.to_np_input(dataset.features, dataset.feature_types), dataset.targets,
                             batch_size=batch_size, **kwargs)
 
         return h1, h2
@@ -266,14 +276,14 @@ class ConfNet:
 
     def load(self, file_name, dataset):
         self.net_f(np.concatenate(
-            [np.pad(f[:100], ((0, 0), (0, 10 + 1))) if t != FeatureType.CASE else np.expand_dims(f[:100], axis=-1) for
-             f, t in
-             zip(dataset.features, dataset.feature_types)], axis=1))
+            [np.pad(f[:50], ((0, 0), (0, self.align_steps + 1))) if t != FeatureType.CASE else np.expand_dims(f[:50],
+                                                                                                              axis=-1)
+             for f, t in zip(dataset.features, dataset.feature_types)], axis=1))
         self.net_f.load_weights(file_name + '_forward.h5')
         self.net_b(np.concatenate(
-            [np.pad(f[:100], ((0, 0), (0, 10 + 1))) if t != FeatureType.CASE else np.expand_dims(f[:100], axis=-1) for
-             f, t in
-             zip(dataset.features, dataset.feature_types)], axis=1))
+            [np.pad(f[:50], ((0, 0), (0, self.align_steps + 1))) if t != FeatureType.CASE else np.expand_dims(f[:50],
+                                                                                                              axis=-1)
+             for f, t in zip(dataset.features, dataset.feature_types)], axis=1))
         self.net_b.load_weights(file_name + '_backward.h5')
 
     def batch_align(self, dataset, batch_size=5000, detailed=False, **kwargs):
@@ -308,7 +318,7 @@ class ConfNet:
 
         return alignments, beams, costs
 
-    def align(self, dataset, k=5, hot_start=True, steps=10, delete_max=3, detailed=False):
+    def align(self, dataset, k=5, hot_start=True, delete_max=3, detailed=False):
         i = 0
         converged = False
         go_backwards = False
@@ -322,7 +332,8 @@ class ConfNet:
 
         # Prepare data
         x_case = [_x for _x in x if len(_x.shape) == 1]
-        x = [np.pad(_x, ((0, 0), (0, steps + 1))) for _x in x if len(_x.shape) == 2]  # Create space for inserts
+        x = [np.pad(_x, ((0, 0), (0, self.align_steps + 1))) for _x in x if
+             len(_x.shape) == 2]  # Create space for inserts
         start_beams = np.copy(x[0])
         alive = np.ones(x[0].shape[0], dtype=bool)
         x_p = np.zeros(x[0].shape[0])
@@ -334,7 +345,7 @@ class ConfNet:
         # Convergence
         last_beams_y = None
 
-        for _ in range(steps):
+        for _ in range(self.align_steps):
             if converged:
                 print('Converged')
                 break
@@ -469,3 +480,8 @@ class ConfNet:
             return alignments, beams, costs, start_beams, start_probs, probs, inserts, deletes
 
         return alignments, beams, costs
+
+    @staticmethod
+    def to_np_input(features, types):
+        return np.concatenate([f if t != FeatureType.CASE else np.expand_dims(f, axis=-1) for f, t in
+                               zip(features, types)], axis=1)

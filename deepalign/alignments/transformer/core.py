@@ -1,6 +1,5 @@
 import tensorflow as tf
 import numpy as np
-import math
 
 from deepalign import Dataset
 from deepalign.anomalydetection import AnomalyDetectionResult
@@ -21,7 +20,6 @@ class Transformer(tf.keras.Model):
 
     loaded = False
 
-    # TODO: Tune Params, e.g. num_encoder_layers, mha_heads
     def __init__(self,
                  dataset,
                  num_encoder_layers=2,
@@ -30,7 +28,7 @@ class Transformer(tf.keras.Model):
                  ff_dim=32,
                  fixed_emb_dim=12,
                  use_present_attributes=True,
-                 max_case_length_modificator=0):
+                 max_case_len_mod=0):
         super(Transformer, self).__init__()
 
         # Parameters
@@ -75,7 +73,7 @@ class Transformer(tf.keras.Model):
         self.num_encoder_layers = num_encoder_layers
         self.num_total_attributes = dataset.num_attributes
         self.num_event_attributes = dataset.num_event_attributes
-        self.max_case_length = (dataset.max_len + max_case_length_modificator) * self.num_event_attributes
+        self.max_case_length = (dataset.max_len + max_case_len_mod) * self.num_event_attributes
 
         self.encoder = Encoder(num_encoder_layers, self.num_event_attributes, self.d_model, mha_heads, ff_dim,
                                self.max_case_length, rate=dropout_rate)
@@ -83,10 +81,8 @@ class Transformer(tf.keras.Model):
         self.look_ahead_mask = tf.linalg.band_part(tf.ones((self.max_case_length, self.max_case_length)), -1, 0)
         # self.look_ahead_mask = tf.pad(self.look_ahead_mask[:, 1:], ((0, 0), (0, 1)))  # Dont allow "self" attention
 
-    def call(self, x_in_, training=False):
+    def call(self, x_in_, training=False, return_attentions=False):
         if not isinstance(x_in_, list):
-            # inputs = [inputs]
-            # x_in = [x_in[:, :, i] for i in range(self.num_total_attributes)]
             x_in = []
 
             i = 0
@@ -114,24 +110,7 @@ class Transformer(tf.keras.Model):
         x_cf._keras_mask = tf.concat([emb_mask[:, i:i + 1] for i in range(emb_mask.shape[1])  # TODO: Inefficient?
                                       for _ in range(self.num_event_attributes)], axis=-1)
 
-        # TODO: Positional Encoding should probably be the same for all attributes of the same event, right?
         x_cf, encoder_attentions = self.encoder(x_cf, training=training, mask=self.look_ahead_mask)
-        # x = tf.reshape(x, [x.shape[0], x.shape[1] // self.num_attributes, x.shape[2] * self.num_attributes])
-
-        # outputs = []
-        # for i, p, d, o in zip(range(self.num_attributes), self.pre_outs, self.dropout_outs, self.outs):
-        #     if self.use_present_attributes:
-        #         present_attributes = tf.concat([x_emb[:, :, :i], x_emb[:, :, i + 1:]], axis=-2)
-        #         present_attributes = tf.reshape(present_attributes,
-        #                                         [*present_attributes.shape[:2],
-        #                                          present_attributes.shape[2] * present_attributes.shape[3]])
-        #
-        #         x_local = tf.concat([x, present_attributes], axis=-1)
-        #     else:
-        #         x_local = x
-        #
-        #     pre_out = d(p(x_local), training=training)
-        #     outputs.append(o(pre_out))
 
         if len(fc_in) > 0:
             x_fc = tf.concat([input(x_, training=training) for x_, input in zip(fc_in, self.fc_inputs)], axis=-1)
@@ -144,11 +123,13 @@ class Transformer(tf.keras.Model):
         outputs = [o(p(x))[:, (i - 1) % self.num_event_attributes::self.num_event_attributes] for i, p, o in
                    zip(range(len(self.outs)), self.pre_outs, self.outs)]
 
-        return outputs  # , tf.math.reduce_mean(encoder_attentions, axis=2)
+        if return_attentions:
+            return outputs, tf.math.reduce_mean(encoder_attentions, axis=2)
+        else:
+            return outputs  # , tf.math.reduce_mean(encoder_attentions, axis=2)
 
     def score(self, features, predictions):
         # Add perfect prediction for start symbol
-
         for i, prediction in enumerate(predictions):
             p = np.pad(prediction[:, :-1], ((0, 0), (1, 0), (0, 0)), mode='constant')
             p[:, 0, features[i][0, 0]] = 1
@@ -158,32 +139,13 @@ class Transformer(tf.keras.Model):
 
     def detect(self, dataset, batch_size=50):
         if isinstance(dataset, Dataset):
-            # features = dataset.hierarchic_features
             features = dataset.features
             standard_features = dataset.features
         else:
             features = dataset
             standard_features = dataset
 
-            # # Get attentions and predictions
-            # predictions = [[] for _ in range(dataset.num_attributes)]
-            # attentions = [[[[] for _ in range(dataset.num_attributes)] for _ in range(dataset.num_attributes)]
-            #               for _ in range(self.num_encoder_layers)]
-            # for step in range(dataset.num_cases // batch_size):
-            #     prediction, attentions_raw = self([f[step * batch_size:(step + 1) * batch_size] for f in features],
-            #                                       training=False)
-            #
-            #     for i in range(dataset.num_attributes):
-            #         predictions[i].append(prediction[i].numpy())
-            #
-            #         for k in range(len(attentions_raw)):
-            #             outer_mask = tf.equal(tf.range(attentions_raw[k].shape[-2]) % dataset.num_attributes, i)
-            #             outer_masked = tf.boolean_mask(attentions_raw[k], outer_mask, axis=-2)
-            #
-            #             for j in range(dataset.num_attributes):
-            #                 attentions[k][i][j].append(outer_masked[:, j].numpy().astype(np.float16))
-
-            # Get attentions and predictions
+        # Get attentions and predictions
         predictions = [[] for _ in range(dataset.num_attributes)]
         attentions = [[[[] for _ in range(dataset.num_attributes)] for _ in range(dataset.num_attributes)]
                       for _ in range(self.num_encoder_layers)]
@@ -198,7 +160,6 @@ class Transformer(tf.keras.Model):
                     pred = prediction[i]
 
                 predictions[i].append(pred.numpy())
-                # TODO: ADD PERFECT PREDICTION FOR STOP SYMBOL! BUT AT THE RIGHT POSITION! (NOT NECCESSARY THE END)
 
                 for k in range(len(attentions_raw)):
                     outer_mask = tf.equal(tf.range(attentions_raw[k].shape[-2]) % dataset.num_attributes, i)
@@ -219,8 +180,6 @@ class Transformer(tf.keras.Model):
             for k in range(len(attentions)):
                 for j in range(dataset.num_attributes):
                     attentions[k][i][j] = np.concatenate(attentions[k][i][j], axis=0)
-                    # attentions_concat = np.concatenate(attentions[k][i][j], axis=0)
-                    # attentions[k][i][j] = np.pad(attentions_concat[:, :-1], ((0, 0), (1, 0), (0, 0)), mode='constant')
 
         if not isinstance(predictions, list):
             predictions = [predictions]
@@ -229,7 +188,6 @@ class Transformer(tf.keras.Model):
                                       predictions=predictions, attentions=attentions)
 
     def load(self, model_file):
-        # TODO: Remove hardcoded values
         if not self.loaded:
             self.compile(tf.keras.optimizers.Adam(), 'categorical_crossentropy')
             self([f[:50] for f in self.dataset.features])

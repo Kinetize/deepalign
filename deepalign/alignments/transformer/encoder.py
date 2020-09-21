@@ -60,17 +60,6 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.dropout2 = tf.keras.layers.Dropout(rate)
 
     def call(self, x, training, mask):
-        # attn_output = []
-        # attentions = []
-        # for i, mha, d in zip(range(self.num_attributes), self.mha, self.dropout1): # (num_attributes, batch_size, input_seq_len, d_model)
-        #     x_ = x[:, i::self.num_attributes]
-        #     att_o, att = mha(x_, x_, x, mask[:, i::self.num_attributes])
-        #
-        #     attn_output.append(d(att_o))
-        #     attentions.append(att)
-        #
-        # attn_output = tf.math.reduce_sum(attn_output, axis=0)
-
         attn_output, attentions = self.mha(x, x, x, mask)  # (batch_size, input_seq_len, d_model)
         attn_output = self.dropout1(attn_output, training=training)
 
